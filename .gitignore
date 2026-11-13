@@ -10,3 +10,6 @@ fmt-*.log
 tests-*.log
 test-compile-*.log
 
+
+# Local MCP server logs (virtualization-mcp writes here)
+/logs/
