@@ -128,3 +128,39 @@ fn low_percentages_leave_room_for_retained_history_and_both_summaries() {
         assert_eq!(compaction_threshold(65_536, 32_000, &settings), 17_152);
     }
 }
+
+/// models.json -> the loaded model -> the trigger: a `compat.compactionOutputReserve` keeps only that much of a
+/// 32 768-token `maxTokens` free (GENGHIS stops a long answer at the window's end instead of rejecting it), so a
+/// 131 072 window compacts at 118 784 (~90.6%) instead of 94 208 (~72%). Unset, too big, or not a number: as before.
+#[test]
+fn a_compat_output_reserve_lowers_only_the_compaction_headroom() {
+    // One provider per case: the setting is a provider's `compat` (the loader keeps a provider's compat for each of
+    // its models; a model entry's own `compat` is not read for custom models in this build).
+    let provider = |name: &str, compat: &str, id: &str| {
+        format!(
+            r#""{name}": {{ "baseUrl": "http://127.0.0.1:8899/v1", "api": "openai-completions", "apiKey": "not-needed",
+                {compat} "models": [ {{ "id": "{id}", "contextWindow": 131072, "maxTokens": 32768 }} ] }}"#
+        )
+    };
+    let json = format!(
+        r#"{{ "providers": {{ {}, {}, {}, {} }} }}"#,
+        provider("genghis", r#""compat": { "compactionOutputReserve": 8192 },"#, "with-reserve"),
+        provider("plain", "", "without"),
+        provider("big", r#""compat": { "compactionOutputReserve": 65536 },"#, "too-big"),
+        provider("text", r#""compat": { "compactionOutputReserve": "8192" },"#, "not-a-number"),
+    );
+    let loaded = crate::models::custom::load_custom_models(&json, &|_| false, &|_| None);
+    assert!(loaded.error.is_none(), "{:?}", loaded.error);
+    let model = |id: &str| loaded.models.iter().find(|m| m.id == id).expect(id).clone();
+    let off = pa_types::ai::ModelThinkingLevel::Off;
+    let settings = CompactionSettings { reserve_tokens: 4_096, ..Default::default() };
+    let threshold = |id: &str| compaction_threshold(131_072, request_output_budget(&model(id), off), &settings);
+
+    assert_eq!(request_output_budget(&model("with-reserve"), off), 8_192);
+    assert_eq!(threshold("with-reserve"), 118_784);
+    assert_eq!(threshold("without"), 94_208, "no key: the whole budget, as before");
+    assert_eq!(request_output_budget(&model("too-big"), off), 32_768, "never more than the real budget");
+    assert_eq!(threshold("not-a-number"), 94_208, "a non-number is ignored");
+    // The requested answer itself is untouched: only the trigger's headroom changes.
+    assert_eq!(pa_ai::effective_request_max_tokens(&model("with-reserve"), off), 32_768);
+}

@@ -209,12 +209,36 @@ pub fn should_compact(
 /// model declares no max output. The combined input+output ceiling reserves
 /// what the request will actually claim, or a budget-folded request can
 /// overflow while the trigger still says "not due".
+///
+/// A model whose `compat` carries [`COMPACTION_OUTPUT_RESERVE_KEY`] keeps only
+/// that much of the budget free instead (never more than the budget itself):
+/// for a server that stops a long answer at the end of its window rather than
+/// rejecting `input + max_tokens > window`, reserving the whole budget makes a
+/// 32 768-token `maxTokens` on a 128 000 window compact at ~68%.
 #[must_use]
 pub fn request_output_budget(
     model: &pa_types::ai::Model,
     thinking: pa_types::ai::ModelThinkingLevel,
 ) -> u64 {
-    pa_ai::effective_request_max_tokens(model, thinking)
+    let budget = pa_ai::effective_request_max_tokens(model, thinking);
+    compaction_output_reserve(model).map_or(budget, |reserve| reserve.min(budget))
+}
+
+/// `compat` key (models.json: a provider's `compat`, which reaches each of its
+/// models; this build's custom-model loader does not read a model entry's own
+/// `compat`): how many tokens of the requested output budget the compaction
+/// trigger keeps free. Unset: the whole budget, as before.
+pub const COMPACTION_OUTPUT_RESERVE_KEY: &str = "compactionOutputReserve";
+
+/// The model's [`COMPACTION_OUTPUT_RESERVE_KEY`], when it is a whole number.
+#[must_use]
+pub fn compaction_output_reserve(model: &pa_types::ai::Model) -> Option<u64> {
+    model
+        .compat
+        .as_ref()?
+        .raw
+        .get(COMPACTION_OUTPUT_RESERVE_KEY)?
+        .as_u64()
 }
 
 /// The message-anchored context estimate: the last valid assistant usage
